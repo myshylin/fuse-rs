@@ -5,13 +5,13 @@
 //! filesystem is mounted, the session loop receives, dispatches and replies to kernel requests
 //! for filesystem operations under its mount point.
 
-use std::io;
+use libc::{EAGAIN, EINTR, ENODEV, ENOENT};
+use log::error;
 use std::ffi::OsStr;
 use std::fmt;
-use std::path::{PathBuf, Path};
+use std::io;
+use std::path::{Path, PathBuf};
 use thread_scoped::{scoped, JoinGuard};
-use libc::{EAGAIN, EINTR, ENODEV, ENOENT};
-use log::{error, info};
 
 use crate::channel::{self, Channel};
 use crate::request::Request;
@@ -46,16 +46,13 @@ pub struct Session<FS: Filesystem> {
 impl<FS: Filesystem> Session<FS> {
     /// Create a new session by mounting the given filesystem to the given mountpoint
     pub fn new(filesystem: FS, mountpoint: &Path, options: &[&OsStr]) -> io::Result<Session<FS>> {
-        info!("Mounting {}", mountpoint.display());
-        Channel::new(mountpoint, options).map(|ch| {
-            Session {
-                filesystem: filesystem,
-                ch: ch,
-                proto_major: 0,
-                proto_minor: 0,
-                initialized: false,
-                destroyed: false,
-            }
+        Channel::new(mountpoint, options).map(|ch| Session {
+            filesystem: filesystem,
+            ch: ch,
+            proto_major: 0,
+            proto_minor: 0,
+            initialized: false,
+            destroyed: false,
         })
     }
 
@@ -93,7 +90,7 @@ impl<FS: Filesystem> Session<FS> {
                     Some(ENODEV) => break,
                     // Unhandled error
                     _ => return Err(err),
-                }
+                },
             }
         }
         Ok(())
@@ -108,9 +105,7 @@ impl<'a, FS: Filesystem + Send + 'a> Session<FS> {
 }
 
 impl<FS: Filesystem> Drop for Session<FS> {
-    fn drop(&mut self) {
-        info!("Unmounted {}", self.mountpoint().display());
-    }
+    fn drop(&mut self) {}
 }
 
 /// The background session data structure
@@ -125,19 +120,23 @@ impl<'a> BackgroundSession<'a> {
     /// Create a new background session for the given session by running its
     /// session loop in a background thread. If the returned handle is dropped,
     /// the filesystem is unmounted and the given session ends.
-    pub unsafe fn new<FS: Filesystem + Send + 'a>(se: Session<FS>) -> io::Result<BackgroundSession<'a>> {
+    pub unsafe fn new<FS: Filesystem + Send + 'a>(
+        se: Session<FS>,
+    ) -> io::Result<BackgroundSession<'a>> {
         let mountpoint = se.mountpoint().to_path_buf();
         let guard = scoped(move || {
             let mut se = se;
             se.run()
         });
-        Ok(BackgroundSession { mountpoint: mountpoint, guard: guard })
+        Ok(BackgroundSession {
+            mountpoint: mountpoint,
+            guard: guard,
+        })
     }
 }
 
 impl<'a> Drop for BackgroundSession<'a> {
     fn drop(&mut self) {
-        info!("Unmounting {}", self.mountpoint.display());
         // Unmounting the filesystem will eventually end the session loop,
         // drop the session and hence end the background thread.
         match channel::unmount(&self.mountpoint) {
@@ -151,6 +150,10 @@ impl<'a> Drop for BackgroundSession<'a> {
 // thread_scoped::JoinGuard
 impl<'a> fmt::Debug for BackgroundSession<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "BackgroundSession {{ mountpoint: {:?}, guard: JoinGuard<()> }}", self.mountpoint)
+        write!(
+            f,
+            "BackgroundSession {{ mountpoint: {:?}, guard: JoinGuard<()> }}",
+            self.mountpoint
+        )
     }
 }
